@@ -1,0 +1,159 @@
+/*** DM63x control sketch
+ *  (that will someday make it into a library)
+ *  Copyright (c) 2015 Dmitry Reznikov, ontaelio - at - gmail.com
+ *  Huge thanks to Alex Leone, whose tlc5940 library was a great help
+ *  in understanding the workings of a LED driver chip.
+ *  Just use this sketch as a base for your own Arduino sketch.
+ *  Change the needed values according to your setup.
+ */
+
+
+
+/*** LAT specifications. Pin 9 = PB1; pin10 (SS) = PB2 */
+#define LAT_PIN     PB1  //NOTE: I use pin 9, change here if you prefer pin 10
+#define LAT_PORT    PORTB
+#define LAT_DDR     DDRB
+
+/*** Get LAT low */
+#define LAT_low() PORTB &= ~_BV(LAT_PIN)
+
+/*** LAT pulse - high, then low */
+#define LAT_pulse() LAT_PORT |= _BV(LAT_PIN); LAT_PORT &= ~_BV(LAT_PIN);
+
+#define DM631 24
+#define DM632 32
+#define DM633 24
+#define DM634 32
+
+/*** define the number of DM chips and connected leds */
+#define DMTYPE DM634
+#define DMNUM 3 // number of DMs
+#define RGBNUM 15 // number of RGB LEDs
+#define LEDNUM 48 // number of connected single color LEDs
+#define PINNUM DMNUM*16 // don't change, number of all the DM pins
+#define BYTENUM DMNUM*DMTYPE // don't change, number of bytes to shift in
+
+uint8_t pixel[BYTENUM];  //actual bytes for use with dm_shift
+
+/*** a substitution table for RGB leds. Numbers stand for R, G, B.
+ *  Note that the first leg is 0, I prefer it this way.
+ *  Change the table according to your setup
+ */
+uint8_t ledTable[RGBNUM*3]=
+{15,13,11, 1,0,2, 42,16,17, 46,47,44, 35,32,33,
+ 12,10,14, 6,4,3, 31,29,27, 20,22,18, 36,34,38,
+  9,7,8, 30,28,5, 24,25,26, 19,23,21, 39,37,41};
+
+void dm_init(void)
+{
+    DDRB |= _BV(PB3); // MOSI output, digital pin 11
+    DDRB |= _BV(PB5); // SCK output, digital pin 13
+    DDRB |= _BV(PB2); // SS output - pin 10 must be output in any case!
+    DDRB |= _BV(LAT_PIN); // LAT output if LAT is not on SS pin
+
+        
+    PORTB &= ~_BV(PB5); // set SCK low
+
+    SPSR = _BV(SPI2X); // double SPI speed
+    SPCR = _BV(SPE) | _BV(MSTR);    // enable SPI, master mode, SCK low rising edge
+         
+}
+
+void dm_shift(uint8_t value)
+{
+    SPDR = value; 
+    while (!(SPSR & _BV(SPIF)));
+}
+
+void setGlobalBrightness(uint8_t bri)
+{
+
+SPCR |= _BV(CPOL); //get and keep sck high
+
+/*** 4 LAT pulses to turn on GBC input mode */
+LAT_pulse(); LAT_pulse(); LAT_pulse(); LAT_pulse();
+    
+SPCR &= ~_BV(CPOL);    // sck low, back to default mode
+
+/*** shift GBC data to the drivers
+  * (each DM gets one byte; 7 upper bits control GB data, LSB should be 0 (o/s flag) 
+  * BTW note that it IS possible to set different brightness for each DM chip
+  */
+for (uint8_t count=0; count<DMNUM; count++)
+{dm_shift(bri<<1);}
+
+/*** pulse LAT to latch data */
+LAT_pulse();
+
+sendAll(); //needed because GBC somehow shifts in some PWM garbage too
+
+}
+
+void setPoint(uint8_t pixNum, uint16_t pixVal)
+{
+  if (DMTYPE==24)  // 12-bit data shift
+{
+	uint16_t index = (PINNUM-1) - pixNum;
+ // note the -1 here: it is needed because I prefer to start leg count with 0
+	uint16_t place = ((index * 3) >> 1);
+	if (index & 1) { // starts in the middle
+                 // keep first 4 bits intact | 4 top bits 
+        pixel[place] = (pixel[place] & 0xF0) | (pixVal >> 8);
+                      // 8 lower bits of value
+        pixel[place+1] = pixVal & 0xFF;
+    } else { // starts clean
+                      // 8 upper bits 
+        pixel[place] = pixVal >> 4;
+                                 // 4 lower bits  | keep last 4 bits intact
+        pixel[place+1] = ((uint8_t)(pixVal << 4)) | (pixel[place+1] & 0xF);
+   };
+}
+   else             // 16-bit data shift
+{
+	uint16_t index = (PINNUM-1) - pixNum;
+	uint16_t place = (index * 2);
+	pixel[place] = pixVal >> 8;  // 8 top bits
+	pixel[place+1] = pixVal & 0xFF; // 8 lower bits
+}
+}
+
+void setRGBpoint(uint8_t numPoint, uint16_t rCol, uint16_t gCol, uint16_t bCol)
+{
+  if (numPoint<0 | numPoint>=RGBNUM) return; //change these if you start leg count with 1
+  setPoint(ledTable[(numPoint)*3],rCol);
+  setPoint(ledTable[(numPoint)*3+1],gCol);
+  setPoint(ledTable[(numPoint)*3+2],bCol);
+}
+
+void sendAll()
+{
+	LAT_low();
+	for (uint16_t k=0; k<BYTENUM; k++)
+	{
+		dm_shift(pixel[k]);
+	}
+	LAT_pulse();
+}
+
+void clearAll()
+{
+	for (uint16_t k=0; k<BYTENUM; k++)
+	{pixel[k]=0;}
+}
+
+void setup() {
+
+dm_init();
+
+}
+
+void loop() {
+  // here's just a test loop
+
+setGlobalBrightness(50);
+for (uint8_t k=0; k<LEDNUM; k++) {
+clearAll(); setPoint(k, 2047*DMTYPE);
+sendAll(); delay(200);
+}
+
+}
